@@ -11,16 +11,8 @@ use cranelift::prelude::*;
 use cranelift::{frontend::FunctionBuilderContext, prelude::types::I64};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, ModuleError};
-use peg::error::ParseError;
-use peg::str::LineCol;
 
-use crate::frontend::{parse, Operation, Register, RegisterOrLiteral};
-
-#[derive(Debug)]
-pub enum Error {
-    ParseError(ParseError<LineCol>),
-    CompileError(ModuleError),
-}
+use crate::frontend::{Operation, Register, RegisterOrLiteral};
 
 pub struct Function {
     _module: JITModule,
@@ -28,21 +20,12 @@ pub struct Function {
 }
 
 impl Function {
-    pub fn new(text: &str) -> Result<Self, Error> {
-        match parse(text) {
-            Ok(ast) => Self::compile(ast),
-            Err(err) => Err(Error::ParseError(err)),
-        }
-    }
-
-    pub fn compile(stmts: Vec<Operation>) -> Result<Self, Error> {
-        match compile(stmts) {
-            Ok((_module, inner)) => Ok(Self {
-                _module,
-                inner: unsafe { transmute(inner) },
-            }),
-            Err(err) => Err(Error::CompileError(err)),
-        }
+    pub fn new(stmts: Vec<Operation>) -> Result<Self, ModuleError> {
+        let (_module, inner) = compile(stmts)?;
+        Ok(Self {
+            _module,
+            inner: unsafe { transmute(inner) },
+        })
     }
 
     pub fn run<'a, I>(&self, it: I) -> Result<Mem, ()>
@@ -120,7 +103,10 @@ fn translate(module: &mut JITModule, ctx: &mut Context, stmts: Vec<Operation>) {
 
     builder.seal_block(entry_block);
 
-    let variables = declare_variables(int, ptr, &mut builder, entry_block);
+    let zero = builder.ins().iconst(int, 0);
+    let one = builder.ins().iconst(int, 1);
+
+    let variables = declare_variables(zero, int, ptr, &mut builder, entry_block);
 
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(ptr));
@@ -129,6 +115,8 @@ fn translate(module: &mut JITModule, ctx: &mut Context, stmts: Vec<Operation>) {
     let signature = builder.import_signature(signature);
     for op in stmts {
         compile_op(
+            zero,
+            one,
             int,
             error_block,
             signature,
@@ -247,6 +235,8 @@ fn rem(
 }
 
 fn eql(
+    zero: Value,
+    one: Value,
     ty: Type,
     variables: &HashMap<VarKey, Variable>,
     builder: &mut FunctionBuilder,
@@ -256,11 +246,15 @@ fn eql(
     let var_a = variables[&VarKey::Reg(a)];
     let a = builder.use_var(var_a);
     let b = get_reg_or_lit(ty, variables, builder, b);
-    let res = builder.ins().icmp(IntCC::Equal, a, b);
-    builder.def_var(var_a, res);
+
+    let cond_val = builder.ins().icmp(IntCC::Equal, a, b);
+    let int_val = builder.ins().select(cond_val, one, zero);
+    builder.def_var(var_a, int_val);
 }
 
 fn compile_op(
+    zero: Value,
+    one: Value,
     ty: Type,
     error_block: Block,
     signature: SigRef,
@@ -283,7 +277,7 @@ fn compile_op(
         Operation::Mul(a, b) => mul(ty, variables, builder, a, b),
         Operation::Div(a, b) => div(ty, variables, builder, a, b),
         Operation::Mod(a, b) => rem(ty, variables, builder, a, b),
-        Operation::Eql(a, b) => eql(ty, variables, builder, a, b),
+        Operation::Eql(a, b) => eql(zero, one, ty, variables, builder, a, b),
     }
 }
 
@@ -367,10 +361,10 @@ where
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(C, packed)]
 pub struct Mem {
-    w: i64,
-    x: i64,
-    y: i64,
-    z: i64,
+    pub w: i64,
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
 }
 
 #[test]
@@ -395,9 +389,10 @@ fn test1_inner(next: unsafe extern "C" fn(*mut ()) -> *const (), data: *mut ()) 
 }
 
 #[test]
-fn test2() -> Result<(), Error> {
-    let v: Vec<i64> = vec![1, 2, 3];
-    let f = Function::new(
+fn test2() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::frontend::parse;
+
+    let stmts = parse(
         "add w 2
 inp x
 add x 2
@@ -406,11 +401,15 @@ add y 2
 inp z
 add z 2",
     )?;
+
+    let v: Vec<i64> = vec![1, 2, 3];
+    let f = Function::new(stmts)?;
     println!("{:?}", f.run(v.into_iter()));
     Ok(())
 }
 
 fn declare_variables(
+    zero: Value,
     int_ty: Type,
     ptr_ty: Type,
     builder: &mut FunctionBuilder,
@@ -430,7 +429,6 @@ fn declare_variables(
         builder.def_var(var, builder.block_params(entry_block)[i]);
     }
 
-    let zero = builder.ins().iconst(int_ty, 0);
     for k in [Register::W, Register::X, Register::Y, Register::Z].into_iter() {
         let var = Variable::new(index);
         index += 1;

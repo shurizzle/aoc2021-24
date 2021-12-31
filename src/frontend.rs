@@ -33,7 +33,7 @@ peg::parser! {
         rule newline() = quiet!{"\n" __}
 
         rule literal() -> i64
-            = n:$("-"? ['1'..='9'] ['0'..='9']*) {? n.parse().or(Err("literal"))}
+            = n:$(("-"? ['1'..='9'] ['0'..='9']*) / "0") {? n.parse().or(Err("literal"))}
 
         rule register() -> Register = precedence!{
             ['W' | 'w'] { Register::W }
