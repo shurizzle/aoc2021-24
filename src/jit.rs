@@ -103,10 +103,7 @@ fn translate(module: &mut JITModule, ctx: &mut Context, stmts: Vec<Operation>) {
 
     builder.seal_block(entry_block);
 
-    let zero = builder.ins().iconst(int, 0);
-    let one = builder.ins().iconst(int, 1);
-
-    let variables = declare_variables(zero, int, ptr, &mut builder, entry_block);
+    let variables = declare_variables(int, ptr, &mut builder, entry_block);
 
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(ptr));
@@ -115,8 +112,6 @@ fn translate(module: &mut JITModule, ctx: &mut Context, stmts: Vec<Operation>) {
     let signature = builder.import_signature(signature);
     for op in stmts {
         compile_op(
-            zero,
-            one,
             int,
             error_block,
             signature,
@@ -235,8 +230,6 @@ fn rem(
 }
 
 fn eql(
-    zero: Value,
-    one: Value,
     ty: Type,
     variables: &HashMap<VarKey, Variable>,
     builder: &mut FunctionBuilder,
@@ -248,13 +241,11 @@ fn eql(
     let b = get_reg_or_lit(ty, variables, builder, b);
 
     let cond_val = builder.ins().icmp(IntCC::Equal, a, b);
-    let int_val = builder.ins().select(cond_val, one, zero);
+    let int_val = builder.ins().bint(ty, cond_val);
     builder.def_var(var_a, int_val);
 }
 
 fn compile_op(
-    zero: Value,
-    one: Value,
     ty: Type,
     error_block: Block,
     signature: SigRef,
@@ -277,7 +268,7 @@ fn compile_op(
         Operation::Mul(a, b) => mul(ty, variables, builder, a, b),
         Operation::Div(a, b) => div(ty, variables, builder, a, b),
         Operation::Mod(a, b) => rem(ty, variables, builder, a, b),
-        Operation::Eql(a, b) => eql(zero, one, ty, variables, builder, a, b),
+        Operation::Eql(a, b) => eql(ty, variables, builder, a, b),
     }
 }
 
@@ -409,7 +400,6 @@ add z 2",
 }
 
 fn declare_variables(
-    zero: Value,
     int_ty: Type,
     ptr_ty: Type,
     builder: &mut FunctionBuilder,
@@ -429,6 +419,7 @@ fn declare_variables(
         builder.def_var(var, builder.block_params(entry_block)[i]);
     }
 
+    let zero = builder.ins().iconst(int_ty, 0);
     for k in [Register::W, Register::X, Register::Y, Register::Z].into_iter() {
         let var = Variable::new(index);
         index += 1;
