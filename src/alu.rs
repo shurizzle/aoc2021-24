@@ -51,19 +51,26 @@ pub struct Alu {
 pub trait Input {
     type Iter: Iterator<Item = i64>;
 
-    fn input(&self) -> Self::Iter;
+    fn input(self) -> Self::Iter;
 }
 
 impl Input for i64 {
     type Iter = vec::IntoIter<i64>;
 
-    fn input(&self) -> Self::Iter {
-        (*self)
-            .to_string()
+    fn input(self) -> Self::Iter {
+        self.to_string()
             .chars()
             .map(|c| (c as i64) - ('0' as i64))
             .collect::<Vec<_>>()
             .into_iter()
+    }
+}
+
+impl Input for Vec<i64> {
+    type Iter = vec::IntoIter<i64>;
+
+    fn input(self) -> Self::Iter {
+        self.into_iter()
     }
 }
 
