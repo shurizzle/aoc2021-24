@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::intrinsics::transmute;
 
+use codegen::ir::StackSlot;
 use codegen::Context;
 use memoffset::offset_of;
 
 use cranelift::codegen::ir::SigRef;
-use cranelift::prelude::types::B1;
+use cranelift::prelude::types::{B8, I8};
 use cranelift::prelude::*;
 use cranelift::{frontend::FunctionBuilderContext, prelude::types::I64};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -46,7 +47,7 @@ impl Function {
 
     pub fn run<'a, I>(&self, it: I) -> Result<Mem, ()>
     where
-        I: Iterator<Item = &'a i64> + 'a,
+        I: Iterator<Item = i64> + 'a,
     {
         let mut it = NativeIterator::new(it);
         let mem = Mem::default();
@@ -103,11 +104,13 @@ fn translate(module: &mut JITModule, ctx: &mut Context, stmts: Vec<Operation>) {
     ctx.func.signature.params.push(AbiParam::new(ptr));
     ctx.func.signature.params.push(AbiParam::new(ptr));
 
-    ctx.func.signature.returns.push(AbiParam::new(B1));
+    ctx.func.signature.returns.push(AbiParam::new(B8));
 
     let error_block = ctx.func.dfg.make_block();
 
     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+
+    let stack_slot = builder.create_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8));
 
     let entry_block = builder.create_block();
 
@@ -121,10 +124,19 @@ fn translate(module: &mut JITModule, ctx: &mut Context, stmts: Vec<Operation>) {
 
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(ptr));
-    signature.returns.push(AbiParam::new(ptr));
+    signature.params.push(AbiParam::new(ptr));
+    signature.returns.push(AbiParam::new(I8)); // HACK: B8 fails in branching
     let signature = builder.import_signature(signature);
     for op in stmts {
-        compile_op(int, error_block, signature, &variables, &mut builder, op);
+        compile_op(
+            int,
+            error_block,
+            signature,
+            stack_slot,
+            &variables,
+            &mut builder,
+            op,
+        );
     }
 
     return_(&variables, &mut builder, true);
@@ -141,16 +153,20 @@ fn input(
     ty: Type,
     error_block: Block,
     signature: SigRef,
+    stack_slot: StackSlot,
     variables: &HashMap<VarKey, Variable>,
     builder: &mut FunctionBuilder,
     reg: Register,
 ) {
     let it_fn = builder.use_var(variables[&VarKey::ItFunc]);
-    let it_args = &[builder.use_var(variables[&VarKey::ItData])];
+    let it_args = &[
+        builder.use_var(variables[&VarKey::ItData]),
+        builder.ins().stack_addr(ty, stack_slot, 0i32),
+    ];
     let call = builder.ins().call_indirect(signature, it_fn, it_args);
-    let ptr = builder.inst_results(call)[0];
+    let ok = builder.inst_results(call)[0];
 
-    builder.ins().brz(ptr, error_block, &[]);
+    builder.ins().brz(ok, error_block, &[]);
 
     let cont_block = builder.create_block();
     builder.ins().jump(cont_block, &[]);
@@ -158,7 +174,7 @@ fn input(
     builder.switch_to_block(cont_block);
     builder.seal_block(cont_block);
 
-    let value = builder.ins().load(ty, MemFlags::trusted(), ptr, 0i32);
+    let value = builder.ins().stack_load(ty, stack_slot, 0i32);
     builder.def_var(variables[&VarKey::Reg(reg)], value);
 }
 
@@ -248,12 +264,21 @@ fn compile_op(
     ty: Type,
     error_block: Block,
     signature: SigRef,
+    stack_slot: StackSlot,
     variables: &HashMap<VarKey, Variable>,
     builder: &mut FunctionBuilder,
     op: Operation,
 ) {
     match op {
-        Operation::Inp(reg) => input(ty, error_block, signature, variables, builder, reg),
+        Operation::Inp(reg) => input(
+            ty,
+            error_block,
+            signature,
+            stack_slot,
+            variables,
+            builder,
+            reg,
+        ),
         Operation::Add(a, b) => add(ty, variables, builder, a, b),
         Operation::Mul(a, b) => mul(ty, variables, builder, a, b),
         Operation::Div(a, b) => div(ty, variables, builder, a, b),
@@ -295,24 +320,27 @@ fn return_(variables: &HashMap<VarKey, Variable>, builder: &mut FunctionBuilder,
     for reg in [Register::W, Register::X, Register::Y, Register::Z].into_iter() {
         copy_reg(variables, builder, reg);
     }
-    let res = builder.ins().bconst(B1, what);
+    let res = builder.ins().bconst(B8, what);
     builder.ins().return_(&[res]);
 }
 
 struct NativeIterator<'a> {
-    closure: &'a mut dyn FnMut() -> *const (),
+    closure: &'a mut dyn FnMut(*const ()) -> bool,
 }
 
 impl<'a> NativeIterator<'a> {
     pub fn new<I, T>(mut it: I) -> Self
     where
         T: 'a,
-        I: Iterator<Item = &'a T> + 'a,
+        I: Iterator<Item = T> + 'a,
     {
         Self {
-            closure: Box::leak(Box::new(move || match it.next() {
-                Some(item) => item as *const _ as *const (),
-                None => std::ptr::null(),
+            closure: Box::leak(Box::new(move |ret: *const ()| match it.next() {
+                Some(item) => {
+                    unsafe { std::ptr::copy(&item as *const _, ret as *mut T, 1) };
+                    true
+                }
+                None => false,
             })),
         }
     }
@@ -378,7 +406,7 @@ add y 2
 inp z
 add z 2",
     )?;
-    println!("{:?}", f.run(v.iter()));
+    println!("{:?}", f.run(v.into_iter()));
     Ok(())
 }
 
