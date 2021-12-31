@@ -124,7 +124,10 @@ fn translate(module: &mut JITModule, ctx: &mut Context, stmts: Vec<Operation>) {
 
     return_(&variables, &mut builder, true);
 
-    builder.insert_block_after(error_block, entry_block);
+    match builder.current_block() {
+        Some(current) => builder.insert_block_after(error_block, current),
+        None => builder.func.layout.append_block(error_block),
+    }
     builder.switch_to_block(error_block);
     return_(&variables, &mut builder, false);
     builder.seal_block(error_block);
