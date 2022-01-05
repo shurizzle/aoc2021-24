@@ -1,0 +1,14 @@
+root = true
+
+[*]
+end_of_line = lf
+insert_final_newline = true
+guidelines = 80
+charset = utf-8
+indent_style = space
+tab_width = 2
+indent_size = 2
+
+[*.rs]
+max_line_length = 80
+rulers = 80
